@@ -1,0 +1,185 @@
+const { app, BrowserWindow, ipcMain, shell, Tray, Menu, nativeImage, Notification } = require('electron')
+const path = require('node:path')
+const { JsonStorage } = require('./storage.cjs')
+const { DouyinService } = require('./douyin-service.cjs')
+const { AiService } = require('./ai-service.cjs')
+
+let mainWindow
+let tray
+let storage
+let douyin
+let ai
+let isQuitting = false
+let ownsBytedanceProtocol = false
+
+const BYTEDANCE_PROTOCOL = 'bytedance'
+const isBytedanceUrl = (value) => typeof value === 'string' && /^bytedance:/i.test(value)
+const hasBytedanceUrl = (argv) => argv.some(isBytedanceUrl)
+const hasSingleInstanceLock = app.requestSingleInstanceLock()
+
+if (!hasSingleInstanceLock) app.quit()
+
+app.on('second-instance', (_event, argv) => {
+  // Douyin probes its desktop protocol repeatedly. Consume those launches silently.
+  if (hasBytedanceUrl(argv)) return
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show()
+    mainWindow.focus()
+  }
+})
+
+function createWindow() {
+  const settings = storage?.get()?.settings || {}
+  const appIcon = path.join(__dirname, '..', 'dist', 'favicon.svg')
+  mainWindow = new BrowserWindow({
+    width: 1440,
+    height: 920,
+    minWidth: 980,
+    minHeight: 680,
+    backgroundColor: '#f5f7f8',
+    icon: appIcon,
+    title: '续声 · 抖音私信助手',
+    autoHideMenuBar: true,
+    show: !settings.startMinimized,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  })
+
+  mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (!/^file:/i.test(url)) event.preventDefault()
+  })
+  mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        'Content-Security-Policy': ["default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self' data:;"],
+      },
+    })
+  })
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  mainWindow.on('closed', () => { mainWindow = null })
+  mainWindow.on('close', (event) => {
+    const minimizeToTray = storage?.get()?.settings?.minimizeToTray !== false
+    if (!isQuitting && minimizeToTray) {
+      event.preventDefault()
+      mainWindow.hide()
+    }
+  })
+}
+
+function applySystemSettings(settings = {}) {
+  if (process.platform === 'win32') {
+    app.setLoginItemSettings({ openAtLogin: Boolean(settings.launchOnStartup), openAsHidden: Boolean(settings.startMinimized) })
+  }
+}
+
+function notifyAutomationEvent(event) {
+  const settings = storage?.get()?.settings || {}
+  if (!settings.desktopNotifications || !Notification.isSupported() || event?.type !== 'log') return
+  const type = String(event.payload?.type || '')
+  const failed = /fail|error/i.test(type)
+  const succeeded = /sent|success/i.test(type)
+  if ((failed && settings.notifyOnFailure === false) || (succeeded && settings.notifyOnSuccess === false)) return
+  if (!failed && !succeeded) return
+  new Notification({
+    title: failed ? '续声任务失败' : '续声任务完成',
+    body: event.payload?.message || (failed ? '请打开续声查看失败原因' : '任务已执行完成'),
+    silent: !settings.soundNotifications,
+  }).show()
+}
+
+function createTray() {
+  const icon = nativeImage.createFromPath(path.join(__dirname, '..', 'dist', 'favicon.svg'))
+  tray = new Tray(icon.resize({ width: 16, height: 16 }))
+  tray.setToolTip('续声 · 抖音私信助手')
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: '显示续声', click: () => { mainWindow?.show(); mainWindow?.focus() } },
+    { type: 'separator' },
+    { label: '退出', click: () => { isQuitting = true; app.quit() } },
+  ]))
+  tray.on('double-click', () => { mainWindow?.show(); mainWindow?.focus() })
+}
+
+ipcMain.handle('app:info', () => ({
+  name: '续声',
+  version: app.getVersion(),
+  platform: process.platform,
+}))
+
+ipcMain.handle('app:open-external', (_event, url) => {
+  if (typeof url === 'string' && /^https?:\/\//i.test(url)) return shell.openExternal(url)
+  return false
+})
+
+function getDouyinService() {
+  if (!douyin) throw new Error('抖音登录服务尚未初始化，请重启续声')
+  return douyin
+}
+
+ipcMain.handle('douyin:open-login', () => getDouyinService().openLogin())
+ipcMain.handle('douyin:status', () => getDouyinService().getStatus())
+ipcMain.handle('douyin:logout', () => getDouyinService().logout())
+ipcMain.handle('douyin:sync-contacts', () => getDouyinService().syncContacts())
+ipcMain.handle('douyin:learn-contact', (_event, name) => getDouyinService().learnConversation(name))
+ipcMain.handle('douyin:send-message', (_event, { name, text }) => getDouyinService().sendMessage(name, text))
+ipcMain.handle('douyin:send-task', (_event, { name, task }) => getDouyinService().sendTask(name, task))
+ipcMain.handle('automation:get-state', () => storage.get())
+ipcMain.handle('automation:update', (_event, config) => {
+  if (!storage) throw new Error('本机配置尚未加载，请重试')
+  const next = storage.update(config || {})
+  if (config?.settings) applySystemSettings(next.settings)
+  douyin?.startWorker()
+  return { ok: true, state: next }
+})
+ipcMain.handle('ai:save-provider', (_event, provider) => { try { return ai.saveProvider(provider) } catch (error) { return { ok: false, error: error.message } } })
+ipcMain.handle('ai:delete-provider', (_event, index) => { try { return ai.deleteProvider(index) } catch (error) { return { ok: false, error: error.message } } })
+ipcMain.handle('ai:set-primary-provider', (_event, index) => { try { return ai.setPrimaryProvider(index) } catch (error) { return { ok: false, error: error.message } } })
+ipcMain.handle('ai:test-provider', async (_event, index) => {
+  try {
+    return await ai.test(index)
+  } catch (error) { return { ok: false, message: error.message } }
+})
+ipcMain.handle('ai:draft', async (_event, payload) => { try { return await ai.draft(payload) } catch (error) { return { ok: false, error: error.message } } })
+
+app.whenReady().then(() => {
+  if (!hasSingleInstanceLock) return
+  if (process.platform === 'win32') {
+    ownsBytedanceProtocol = app.setAsDefaultProtocolClient(BYTEDANCE_PROTOCOL)
+  }
+  storage = new JsonStorage(app.getPath('userData'))
+  applySystemSettings(storage.get().settings)
+  ai = new AiService(storage)
+  douyin = new DouyinService({
+    storage,
+    ai,
+    emit: (event) => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('douyin:event', event)
+      notifyAutomationEvent(event)
+    },
+  })
+  createWindow()
+  createTray()
+  douyin.startWorker()
+  app.on('activate', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus() }
+    else createWindow()
+  })
+})
+
+app.on('window-all-closed', () => {
+  if (isQuitting || process.platform !== 'darwin') app.quit()
+})
+
+app.on('before-quit', async () => {
+  isQuitting = true
+  try { await douyin?.destroy() } catch { /* ignore quit-time errors */ }
+  if (ownsBytedanceProtocol) {
+    app.removeAsDefaultProtocolClient(BYTEDANCE_PROTOCOL)
+    ownsBytedanceProtocol = false
+  }
+})

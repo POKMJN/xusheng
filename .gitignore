@@ -1,0 +1,23 @@
+# Build outputs and installers
+*.exe
+resources/app.asar.codex-*
+
+# Electron runtime copied beside the installer
+*.dll
+*.pak
+*.bin
+*.dat
+vk_swiftshader_icd.json
+locales/
+
+# Local verification artifacts
+.playwright-cli/
+asar-check/
+
+# Local installer side effects
+unins000.dat
+unins000.exe
+
+# Dependencies and caches
+node_modules/
+*.log
