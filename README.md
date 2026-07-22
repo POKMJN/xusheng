@@ -60,6 +60,3 @@ npx --yes @electron/asar pack app-source resources/app.asar
 - AI 回复会根据你配置的模型接口发送必要的联系人画像、输入消息和上下文。
 - 请在符合平台规则和对方预期的前提下使用自动回复与续火花功能。
 
-## 发布建议
-
-GitHub 源码仓库只保存源码、脚本和说明文件；Windows 安装包上传到 GitHub Releases。完整 Electron 运行时文件较大，其中 `续声.exe` 超过 GitHub 普通文件 100MB 限制，如需纳入仓库请使用 Git LFS 或重新整理仓库历史。
