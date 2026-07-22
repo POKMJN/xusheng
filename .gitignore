@@ -13,10 +13,13 @@ locales/
 # Local verification artifacts
 .playwright-cli/
 asar-check/
+.reasonix/
 
 # Local installer side effects
 unins000.dat
 unins000.exe
+LICENSES.chromium.html
+使用说明.txt
 
 # Dependencies and caches
 node_modules/
